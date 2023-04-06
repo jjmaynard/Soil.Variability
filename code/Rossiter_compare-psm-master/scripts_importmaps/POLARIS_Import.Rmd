@@ -1,0 +1,217 @@
+---
+title: "POLARIS --- Import for PSM comparisons"
+author:
+  - "D G Rossiter"
+  - "d.g.rossiter@cornell.edu"
+date: "`r format(Sys.Date(), '%d-%B-%Y')`"
+params:
+   lrc_long: -120
+   lrc_lat: 37
+   size: 1
+   voi.n: 3
+   quantile.n: 4
+   depth.n: 4
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    theme: spacelab
+    number_section: yes
+    fig_height: 7
+    fig_width: 7
+    fig_caption: false
+    code_folding: show
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, purl=FALSE, fig.align = 'center')
+knitr::opts_chunk$set(cache.extra = R.version.string, comment="")
+```
+
+# Introduction
+
+_POLARIS_ is the result of harmonizing diverse SSURGO and STATSGO polygon data with the DSMART algorithm to produce a raster soil series map (30 m resolution) and then extracting property information from Official Series Descriptions.
+
+It is explained in: Chaney, N. W., Minasny, B., Herman, J. D., Nauman, T. W., Brungard, C. W., Morgan, C. L. S., McBratney, A. B., Wood, E. F., & Yimam, Y. (2019). POLARIS soil properties: 30-m probabilistic maps of soil properties over the contiguous United States. Water Resources Research, 55(4), 2916–2938. Scopus. https://doi.org/10.1029/2018WR022797 
+
+POLARIS is organized as $1 \times 1^\circ$ tiles.
+
+To use this script:
+
+1. Ajust the [directory structure](#dirs) to your system
+
+2. [Select a property and quantile](#voi) and [select a depth slice](#depth), using the YAML header or by knitting with parameters.
+
+3. [Select an Area of Interest](#aoi), using the YAML header or by knitting with parameters.
+
+4. Either compile to HTML or PDF ("knit"), or "Run All" within R Markdown.
+
+5. The processed tile will be in the directory structure, in a [subdirectory named for the AOI](#import).
+
+This GeoTIFF can then be read into R and compared with other PSM products.
+
+# Directories {#dirs}
+
+Set base directories, specific to the local file system. 
+
+Directory `base.dir.polaris.import` is where downloaded large (up to 35 Mb) GeoTIFF are located. Because of their size they may be on a separate file system, e.g., removable or networked drive.
+
+```{r}
+base.dir.import <- "C:/R_Drive/Data_Files/LPKS_Data/R_Projects/Soil.Variability/data/raw_data/ds/DSM_import/"
+base.dir.polaris.import <- paste0(base.dir.import, "POLARIS/")
+```
+
+These are the base of destination directories built [below](#dest).
+
+# Packages
+
+```{r}
+library(terra)  # for raster import and display
+```
+
+# Parameters
+
+Parameters for this run:
+
+```{r}
+print(paste("lrc_long:", params$lrc_long, "; lrc_lat:", params$lrc_lat, "; size:", params$size))
+print(paste("voi.n:", params$voi.n, "; depth.n:", params$depth.n))
+print(paste("quantile.n:", params$quantile.n))
+```
+
+
+## Variable and quantile of interest {#voi}
+
+Define the variables for the soil property and layer of interest.
+
+* `p5` - 5% quantile from the machine-learning methods;
+* `p50` - median of the distribution;
+* `p95` - 95% quantile;
+* `mean` - mean of the distribution.
+
+```{r}
+quantile.list.polaris <- c("p5", "p50", "p95", "mean")
+```
+
+The list of properties and their units of measure is [here](http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0/Readme).
+
+Relevant here are:
+
+* clay - clay percentage, %
+* silt - silt percentage, %
+* sand - sand percentage, %
+* ph - soil pH in H2O, N/A
+* om - organic matter, log10(%)
+* bd - bulk density, g/cm3
+
+There are also soil hydrological parameters we do not process.
+
+```{r}
+voi.list.polaris <- c("clay", "silt", "sand", "ph", "om", "bd") 
+```
+
+Set the property and quantile from the YAML or rendering parameters:
+
+```{r}
+voi.polaris <- voi.list.polaris[params$voi.n]
+quantile.polaris <- quantile.list.polaris[params$quantile.n]
+```
+
+
+## Depth slice {#depth}
+
+Depth slices, in cm:
+
+```{r}
+depth.list.polaris <- c("0_5", "5_15", "15_30", "30_60", "60_100", "100_200")
+```
+
+Set the depth from the YAML or rendering parameters.
+Then build a full layer name with the property, depth, and quantile:
+
+```{r}
+depth.polaris <- depth.list.polaris[params$depth.n]
+(voi_layer <- paste(voi.polaris, depth.polaris, quantile.polaris, sep="_")) # layer of interest 
+```
+
+## Area of Interest (AOI) {#aoi}
+
+POLARIS data is served in $1 \times 1^\circ$ tiles using WGS84 geographic coordinates. Specify the _lower-right corner_, then compute the upper-right corner $1^\circ$ west and north.
+
+Specify the lower-right corner from the YAML or rendering parameters:
+
+```{r lrc}
+tile.lrc <- c(params$lrc_long, params$lrc_lat) # lower-right corner
+```
+
+Compute the upper-left corner:
+
+```{r ulc}
+tile.ulc <- c(tile.lrc[1]-1, tile.lrc[2]+1) # upper-left corner
+```
+
+A prefix for directories, to keep AOI results separate.
+
+```{r dir.prefix}
+AOI.dir.prefix <- paste0("lat", tile.lrc[2], tile.ulc[2],
+                         "_lon", tile.ulc[1], tile.lrc[1])
+```
+
+# Import the POLARIS tile {#import}
+
+POLARIS tiles as GeoTIFFs can be downloaded [here](http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0).
+These are organized as hierarchical directory: property, depth, quantile.
+The file name contains the tile bounding box, e.g. `lat4142_lon-78-77.tif`.
+
+Download the file if we don't already have it.
+
+
+Second, make sure the directory exists, creating it if necessary.
+
+```{r}
+(dest.dir.polaris.import <-  paste0(base.dir.polaris.import, 
+                            AOI.dir.prefix, "/",
+                            voi.polaris, "/", 
+                            quantile.polaris, "/", 
+                            depth.polaris))
+if (!dir.exists(dest.dir.polaris.import)) {
+   dir.create(dest.dir.polaris.import, recursive = TRUE)
+}
+```
+
+Finally, download the tile.
+
+```{r}
+polaris.tile <- paste0("lat", tile.lrc[2], tile.ulc[2],
+                        "_lon", tile.ulc[1], tile.lrc[1],
+                        ".tif")
+(dest.file <- paste0(dest.dir.polaris.import, "/", polaris.tile))
+if (!file.exists(dest.file)) {
+   download.file(
+      url = 
+         paste0("http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0/",
+                voi.polaris, "/", quantile.polaris, "/", depth.polaris, "/",
+                polaris.tile), 
+      destfile = dest.file,
+      method = "auto", mode="wb")
+} else {
+   print("Local copy of file already exists")
+}
+```
+
+These are quite large (8 -- 35 Mb) and therefore are read into the import location.
+They can be deleted after they have been read into R.
+
+# Check
+
+Import to R and print/plot, to check:
+
+```{r fig.cap="Checking the imported POLARIS tile"}
+r <- terra::rast(dest.file)
+print(r)
+plot(r)
+```
+
+
